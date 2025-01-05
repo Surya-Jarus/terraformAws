@@ -1,68 +1,161 @@
-
 provider "aws" {
     shared_credentials_files = ["credentials location"]
      profile  = "default"
-     region = "ap-south-1"  # Specify your desired region
+     region = "us-west-2"  # Specify your desired region
 }
-#to create a AWS VPC
-resource "aws_vpc" main{
-    cidr_block = "10.0.0.0/16"
-    tags = {
-        Name = "main-vpc"
-    }
-}
-#create a subnet associate with VPC
-resource "aws_subnet" "main" {
-    vpc_id     = aws_vpc.main.id
-    cidr_block = "10.0.1.0/24"
 
-    tags = {
-      Name = "main-subnet"
-  }
-}
-#adding the IAM Role which i have created by console
+# Adding the IAM Role which I have created by console
 data "aws_iam_role" "existing_role" {
   name = "DemoRole"
 }
 
-#create a AWS IAM instance profile basned on the role
-resource "aws_iam_instance_profile" "example_instance_profile" {
-  name = "example_instance_profile"
-  role = data.aws_iam_role.existing_role.name
+data "aws_vpc" "default" {
+  default = true
 }
 
-#create a security group with inbound and outbound traffic for http and ssh
-resource "aws_security_group" "main" {
-    name = "allow_http"
-    description = "Allow http traffic"
-    vpc_id = aws_vpc.main.id
-
-    ingress {
-        from_port = 80
-        to_port = 80
-        protocol = "tcp"
-        cidr_blocks = ["0.0.0.0/0"]
-    }
-    egress {
-        from_port = 0
-        to_port = 0
-        protocol =  -1
-        cidr_blocks = ["0.0.0.0/0"]
-    }
+data "aws_subnets" "default" {
+  filter {
+    name = "vpc-id"
+    values = [data.aws_vpc.default.id]
+  }
+  
 }
 
-#create an instace
-resource "aws_instance" web-server{
 
-    ami = "ami-0fd05997b4dff7aac"
-    instance_type = "t2.micro"
-    iam_instance_profile =  aws_iam_instance_profile.example_instance_profile.name
-    key_name = "my-first-instance"
-     subnet_id = aws_subnet.main.id
-    vpc_security_group_ids = [aws_security_group.main.id]
+# Create a security group with inbound and outbound traffic for HTTP and SSH
+resource "aws_security_group" "alg_sg" {
+  name        = "allow_http"
+  description = "Allow HTTP traffic"
+  vpc_id      = data.aws_vpc.default.id
 
-    tags = {
-        name = "terraformFirstInstance"
-    }
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
 
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  tags = {
+    name = "defaultVpcSg"
+  }
+}
+
+# Create an ALB
+resource "aws_lb" "app_lb" {
+  name               = "demo-alb"
+  internal           = false
+  load_balancer_type = "application"
+  security_groups    = [aws_security_group.alg_sg.id]
+  subnets            = data.aws_subnets.default.ids
+
+  tags = {
+    name = "demo-lb"
+  }
+}
+
+# Create an ALB target group
+resource "aws_lb_target_group" "app_tg" {
+  name     = "demo-tg"
+  port     = 80
+  protocol = "HTTP"
+  vpc_id   = data.aws_vpc.default.id
+
+  health_check {
+    path = "/"
+    interval = 30
+    timeout = 5
+    healthy_threshold = 2
+    unhealthy_threshold = 2
+    matcher = "200"
+  }
+}
+
+# Create a listener
+resource "aws_lb_listener" "app_listener" {
+  load_balancer_arn = aws_lb.app_lb.arn
+  port              = "80"
+  protocol          = "HTTP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.app_tg.arn
+  }
+}
+
+resource "aws_security_group" "ec2_sg" {
+  name = "ec2-sg"
+  description = "Security group for EC2 instaces"
+  vpc_id = data.aws_vpc.default.id
+
+  ingress {
+    protocol = "tcp"
+    from_port = 80
+    to_port = 80
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  egress {
+    from_port = 0
+    to_port = 0
+    protocol = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  tags = {
+    name = "EC2SG"
+  }
+}
+# Create an instance
+resource "aws_instance" "web-server" {
+  count                  = 2
+  ami                    = "ami-07d9cf938edb0739b"
+  instance_type          = "t2.micro"
+  subnet_id               = element(data.aws_subnets.default.ids, count.index)
+  vpc_security_group_ids = [aws_security_group.ec2_sg.id]
+
+  user_data = <<-EOF
+              #!/bin/bash
+              # Use this for your user data (script from top to bottom)
+              # install httpd (Linux 2 version)
+              yum update -y
+              yum install -y httpd
+              systemctl start httpd
+              systemctl enable httpd
+              echo "<h1>Hello World from $(hostname -f)</h1>" > /var/www/html/index.html
+              EOF
+
+  tags = {
+    Name = "terraformALBInstance"
+  }
+}
+
+# Attach instances to the target group
+resource "aws_lb_target_group_attachment" "web-server" {
+  count = length(aws_instance.web-server) 
+  target_group_arn = aws_lb_target_group.app_tg.arn
+  target_id        = aws_instance.web-server[count.index].id
+  port             = 80
+}
+
+
+# Output the DNS name of the ALB
+output "alb_dns_name" {
+  description = "The DNS name of the Application Load Balancer"
+  value       = aws_lb.app_lb.dns_name
+}
+
+output "instance_public_ips" {
+  value = aws_instance.web-server[*].public_ip
+}
+
+output "default_vpc_id" {
+  value = data.aws_vpc.default.id
+}
+
+output "default_subnets" {
+  value = data.aws_subnets.default.ids
 }

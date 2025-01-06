@@ -1,5 +1,5 @@
 provider "aws" {
-    shared_credentials_files = ["credentials location"]
+    shared_credentials_files = ["C://Users//suryar//.aws//credentials"]
      profile  = "default"
      region = "us-west-2"  # Specify your desired region
 }
@@ -109,15 +109,12 @@ resource "aws_security_group" "ec2_sg" {
     name = "EC2SG"
   }
 }
-# Create an instance
-resource "aws_instance" "web-server" {
-  count                  = 2
-  ami                    = "ami-07d9cf938edb0739b"
-  instance_type          = "t2.micro"
-  subnet_id               = element(data.aws_subnets.default.ids, count.index)
-  vpc_security_group_ids = [aws_security_group.ec2_sg.id]
-
-  user_data = <<-EOF
+# Create an Launch template
+resource "aws_launch_template" "web-server" {
+  name_prefix          = "example-lt"
+  instance_type        = "t2.micro"
+  image_id = "ami-07d9cf938edb0739b"
+  user_data = base64encode(<<-EOF
               #!/bin/bash
               # Use this for your user data (script from top to bottom)
               # install httpd (Linux 2 version)
@@ -126,19 +123,34 @@ resource "aws_instance" "web-server" {
               systemctl start httpd
               systemctl enable httpd
               echo "<h1>Hello World from $(hostname -f)</h1>" > /var/www/html/index.html
-              EOF
+              EOF 
+              )
+  network_interfaces {
+    security_groups =  [aws_security_group.ec2_sg.id]
+  }
 
   tags = {
-    Name = "terraformALBInstance"
+    Name = "terraformLtTemplate"
   }
 }
 
-# Attach instances to the target group
-resource "aws_lb_target_group_attachment" "web-server" {
-  count = length(aws_instance.web-server) 
-  target_group_arn = aws_lb_target_group.app_tg.arn
-  target_id        = aws_instance.web-server[count.index].id
-  port             = 80
+resource "aws_autoscaling_group" "demo-asg" {
+  desired_capacity = 3
+  min_size = 1
+  max_size = 4
+  vpc_zone_identifier = data.aws_subnets.default.ids
+  launch_template {
+    id = aws_launch_template.web-server.id
+    version = "$Latest"
+  }
+  target_group_arns = [aws_lb_target_group.app_tg.arn]
+  health_check_type = "EC2"
+  tag {
+    key = "Name"
+    value = "demo-instance"
+    propagate_at_launch = true
+  }
+  
 }
 
 
@@ -148,9 +160,6 @@ output "alb_dns_name" {
   value       = aws_lb.app_lb.dns_name
 }
 
-output "instance_public_ips" {
-  value = aws_instance.web-server[*].public_ip
-}
 
 output "default_vpc_id" {
   value = data.aws_vpc.default.id
